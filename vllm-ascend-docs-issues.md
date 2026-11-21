@@ -1,6 +1,6 @@
 ﻿# vLLM Ascend Documentation Issues
 
-> 更新时间: 2026-11-21 09:09:10 | 仓库: vllm-project/vllm-ascend | Label: documentation
+> 更新时间: 2026-11-21 10:10:53 | 仓库: vllm-project/vllm-ascend | Label: documentation
 
 | Issue编号 | Issue状态 | 是否应该关闭 | 状态标签 | 是否已回复 | 是否已提供具体解决方案 | Issue链接 | 备注 |
 |---|---|---|---|---|---|---|---|
