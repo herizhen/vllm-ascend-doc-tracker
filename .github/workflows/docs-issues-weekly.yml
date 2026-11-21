@@ -2,37 +2,43 @@ name: Update vllm-ascend documentation issues
 
 on:
   schedule:
-    # 每周一 01:00 UTC（北京时间 09:00）执行
+    # 每周一 01:00 UTC = 北京时间 09:00
     - cron: '0 1 * * 1'
   workflow_dispatch:
 
 permissions:
   contents: write
 
-concurrency:
-  group: docs-issues
-  cancel-in-progress: false
-
 jobs:
   update:
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Generate issue table
+      - name: Install ImportExcel module
         shell: pwsh
         run: |
-          & ./vllm-ascend-docs-issues.ps1 -OutputPath ./vllm-ascend-docs-issues.csv
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module ImportExcel -Scope CurrentUser -Force
 
-      - name: Commit changes
+      - name: Update issue table
+        shell: pwsh
+        run: ./vllm-ascend-docs-issues.ps1
+
+      - name: Commit and push changes
+        shell: bash
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add vllm-ascend-docs-issues.csv
-          if git diff --cached --quiet; then
+          git add vllm-ascend-docs-issues.csv vllm-ascend-docs-issues.xlsx vllm-ascend-docs-issues.md
+          if git diff --staged --quiet; then
             echo "表格无变化，跳过提交"
-          else
-            git commit -s -m "chore: update vllm-ascend documentation issues"
-            git push
+            exit 0
           fi
+          git commit -s -m "chore: update vllm-ascend documentation issue table"
+          git push
