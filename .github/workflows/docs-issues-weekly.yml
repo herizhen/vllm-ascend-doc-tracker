@@ -5,6 +5,11 @@ on:
     # 每周一 01:00 UTC = 北京时间 09:00
     - cron: '0 1 * * 1'
   workflow_dispatch:
+    inputs:
+      refresh_all:
+        description: '全量刷新所有 issue（忽略历史增量，重新分析评论/PR）'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -20,6 +25,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install Excel native dependencies
+        run: sudo apt-get -y update && sudo apt-get install -y --no-install-recommends libgdiplus libc6-dev
+
       - name: Install ImportExcel module
         shell: pwsh
         run: |
@@ -28,7 +36,12 @@ jobs:
 
       - name: Update issue table
         shell: pwsh
-        run: ./vllm-ascend-docs-issues.ps1
+        run: |
+          if ('${{ inputs.refresh_all }}' -eq 'true') {
+            ./vllm-ascend-docs-issues.ps1 -RefreshAll
+          } else {
+            ./vllm-ascend-docs-issues.ps1
+          }
 
       - name: Commit and push changes
         shell: bash
