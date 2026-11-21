@@ -1,0 +1,38 @@
+name: Update vllm-ascend documentation issues
+
+on:
+  schedule:
+    # 每周一 01:00 UTC（北京时间 09:00）执行
+    - cron: '0 1 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: docs-issues
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate issue table
+        shell: pwsh
+        run: |
+          & ./vllm-ascend-docs-issues.ps1 -OutputPath ./vllm-ascend-docs-issues.csv
+
+      - name: Commit changes
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vllm-ascend-docs-issues.csv
+          if git diff --cached --quiet; then
+            echo "表格无变化，跳过提交"
+          else
+            git commit -s -m "chore: update vllm-ascend documentation issues"
+            git push
+          fi
