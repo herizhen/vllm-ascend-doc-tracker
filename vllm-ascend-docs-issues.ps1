@@ -4,9 +4,10 @@
 
 .DESCRIPTION
     - 数据源：GitHub REST API，需要 token（GITHUB_TOKEN 环境变量或 -Token 参数）。
-    - 增量更新：历史 issue 仅刷新「Issue状态」列，新 issue 才全量抓取评论/关联 PR 并计算所有列。
-    - 已关闭 issue 保留在表格中，状态列显示 closed，便于追溯。
-    - 输出 CSV（用于下次增量合并）、XLSX（Excel 查看）、MD（仓库内直接阅读）。
+    - 增量更新（按 updated_at）：历史 open issue 若 updated_at 未变则复用，变了则重新分析；
+      新增 issue 全量抓取；已关闭 issue 保留并标记 closed。
+    - 变更感知：本次运行相对上次的字段变化，在 Excel 中标红（整行红=新增 issue，单元格红=字段变更）。
+    - 输出 CSV（增量数据源）、XLSX（Excel 查看+标红）、MD（仓库内阅读）。
 
 .EXAMPLE
     .\vllm-ascend-docs-issues.ps1 -Token ghp_xxx
@@ -44,9 +45,13 @@ New-Item -ItemType Directory -Force -Path $CacheRoot | Out-Null
 # Windows 上是 curl.exe，Linux/macOS 上是 curl
 $CurlExe = if (Get-Command 'curl.exe' -ErrorAction SilentlyContinue) { 'curl.exe' } else { 'curl' }
 
+# 表格列顺序（最后一列为数据新鲜度，用于增量判断）
+$ColumnOrder = @('Issue编号', 'Issue状态', '是否应该关闭', '状态标签', '是否已回复', '是否已提供具体解决方案', 'Issue链接', '备注', '数据更新时间')
+# 参与“变更标红”对比的业务字段（备注为人工填写、数据更新时间为元数据，均不参与）
+$CompareFields = @('Issue状态', '是否应该关闭', '状态标签', '是否已回复', '是否已提供具体解决方案')
+
 # 机器人账号：不计入“已回复”
 $BotPattern = '(\[bot\]$)|(^github-actions)|(-bot$)|(^bot$)|(^renovate)'
-# 视为“给出了具体解决方案/修复方案”的文本特征
 $SolutionPatterns = @(
     'https?://github\.com/[\w.\-]+/[\w.\-]+/pull/\d+',
     '(?i)\b(fix(es|ed)?|close[sd]?|resolve[sd]?|addressed)\b[^\r\n]{0,24}#\d+',
@@ -54,13 +59,11 @@ $SolutionPatterns = @(
     '(?i)\b(see|refer to)\b[^\r\n]{0,16}\b(pr|pull request)\b',
     '已(经)?(修复|更新|解决|补充|修改|添加|提交|修正)'
 )
-# 视为“已明确解决”的文本特征（用于判断是否应该关闭，口径更严格）
 $ResolvedPatterns = @(
     '(?i)\b(fixed|resolved|addressed)\s+(by|in)\b',
     '(?i)\bhas\s+been\s+(fixed|resolved|addressed|updated)\b',
     '已(经)?(修复|解决|更新)'
 )
-# 维护者/协作者身份
 $MaintainerAssociations = @('MEMBER', 'OWNER', 'COLLABORATOR')
 
 function Invoke-GitHubApi {
@@ -172,18 +175,14 @@ function Get-IssueDetail {
 function Test-SolutionText {
     param([string]$Text)
     if (-not $Text) { return $false }
-    foreach ($p in $SolutionPatterns) {
-        if ($Text -match $p) { return $true }
-    }
+    foreach ($p in $SolutionPatterns) { if ($Text -match $p) { return $true } }
     return $false
 }
 
 function Test-ResolvedText {
     param([string]$Text)
     if (-not $Text) { return $false }
-    foreach ($p in $ResolvedPatterns) {
-        if ($Text -match $p) { return $true }
-    }
+    foreach ($p in $ResolvedPatterns) { if ($Text -match $p) { return $true } }
     return $false
 }
 
@@ -215,7 +214,6 @@ function Get-IssueRow {
         }).Count -gt 0
 
     $shouldClose = $mergedPR -or $dupLabel -or $maintainerSolved
-
     $statusLabels = @($Issue.labels | Where-Object { $_ -ne $Label })
 
     [pscustomobject][ordered]@{
@@ -227,6 +225,7 @@ function Get-IssueRow {
         '是否已提供具体解决方案' = if ($hasSolution) { '是' } else { '否' }
         'Issue链接'             = $Issue.url
         '备注'                  = $Remark
+        '数据更新时间'          = $Issue.updatedAt
     }
 }
 
@@ -242,7 +241,9 @@ function Export-MarkdownFile {
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.AppendLine('# vLLM Ascend Documentation Issues')
     [void]$sb.AppendLine('')
-    [void]$sb.AppendLine("> 更新时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | 仓库: $Repo | Label: $Label")
+    [void]$sb.AppendLine("> 更新时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | 仓库: $Repo | Label: $Label | 共 $($Rows.Count) 条")
+    [void]$sb.AppendLine('')
+    [void]$sb.AppendLine('> Excel 版标红约定：整行红 = 新增 issue；单元格红 = 该字段本次发生变化。')
     [void]$sb.AppendLine('')
     [void]$sb.AppendLine('| Issue编号 | Issue状态 | 是否应该关闭 | 状态标签 | 是否已回复 | 是否已提供具体解决方案 | Issue链接 | 备注 |')
     [void]$sb.AppendLine('|---|---|---|---|---|---|---|---|')
@@ -256,14 +257,47 @@ function Export-MarkdownFile {
 }
 
 function Export-ExcelFile {
-    param($Rows, [string]$Path)
+    param($Rows, [string]$Path, $Changes)
 
     if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
         Write-Warning '未安装 ImportExcel 模块，跳过 Excel 输出。安装命令: Install-Module ImportExcel -Scope CurrentUser'
         return
     }
     Import-Module ImportExcel -ErrorAction Stop
-    $Rows | Export-Excel -Path $Path -WorksheetName 'Issues' -AutoSize -FreezeTopRow -BoldTopRow -TableName 'DocIssues' -TableStyle Medium2
+
+    $pkg = $Rows | Export-Excel -Path $Path -WorksheetName 'Issues' -AutoSize -FreezeTopRow -BoldTopRow -TableName 'DocIssues' -TableStyle Medium2 -PassThru
+    $ws = $pkg.Workbook.Worksheets['Issues']
+
+    # 列名 -> 列号（1-based）
+    $colMap = @{}
+    for ($i = 0; $i -lt $ColumnOrder.Count; $i++) { $colMap[$ColumnOrder[$i]] = $i + 1 }
+    # Issue编号 -> 行号（数据从第 2 行开始，第 1 行为表头）
+    $rowMap = @{}
+    for ($i = 0; $i -lt $Rows.Count; $i++) { $rowMap[[string]$Rows[$i].'Issue编号'] = $i + 2 }
+
+    $markCell = {
+        param($cell)
+        $cell.Style.Fill.PatternType = [OfficeOpenXml.Style.ExcelFillStyle]::Solid
+        $cell.Style.Fill.BackgroundColor.SetColor([System.Drawing.Color]::FromArgb(255, 199, 206))
+        $cell.Style.Font.Color.SetColor([System.Drawing.Color]::FromArgb(156, 0, 6))
+        $cell.Style.Font.Bold = $true
+    }
+
+    foreach ($n in $Changes.Keys) {
+        if (-not $rowMap.ContainsKey($n)) { continue }
+        $r = $rowMap[$n]
+        $c = $Changes[$n]
+        if ($c.IsNew) {
+            # 新增 issue：整行标红
+            foreach ($col in 1..$ColumnOrder.Count) { & $markCell $ws.Cells[$r, $col] }
+        } else {
+            foreach ($f in $c.Fields) {
+                if ($colMap.ContainsKey($f)) { & $markCell $ws.Cells[$r, $colMap[$f]] }
+            }
+        }
+    }
+
+    Close-ExcelPackage $pkg
 }
 
 # ---------- 主流程 ----------
@@ -289,7 +323,9 @@ $openNumbers = @{}
 foreach ($item in $openList) { $openNumbers[[string]$item.number] = $true }
 
 $rows = New-Object System.Collections.Generic.List[object]
+$changeMap = @{}
 $newCount = 0
+$updatedCount = 0
 $reusedCount = 0
 $closedCount = 0
 
@@ -298,60 +334,74 @@ $i = 0
 foreach ($item in $openList) {
     $i++
     $n = [string]$item.number
+    $old = if ($history.ContainsKey($n)) { $history[$n] } else { $null }
 
-    if ($history.ContainsKey($n) -and -not $RefreshAll) {
-        # 历史 issue：仅刷新状态列，其他字段保持历史值
-        $old = $history[$n]
+    # 按 updated_at 判断是否需要重新分析：新增 / 强制刷新 / updated_at 变化 才抓取
+    $needFetch = $RefreshAll -or (-not $old) -or ($old.'数据更新时间' -ne $item.updated_at)
+
+    if (-not $needFetch) {
         $old.'Issue状态' = 'open'
         $rows.Add($old)
         $reusedCount++
         continue
     }
 
-    # 新 issue 或强制刷新：全量抓取
     try {
         $detail = Get-IssueDetail -Number $item.number
         if ($detail) {
-            $remark = if ($history.ContainsKey($n)) { $history[$n].'备注' } else { '' }
-            $rows.Add((Get-IssueRow -Issue $detail -Remark $remark))
-            $newCount++
+            $remark = if ($old) { $old.'备注' } else { '' }
+            $newRow = Get-IssueRow -Issue $detail -Remark $remark
+            if (-not $old) {
+                $changeMap[$n] = @{ IsNew = $true; Fields = @() }
+                $newCount++
+            } else {
+                $fields = @($CompareFields | Where-Object { $old.$_ -ne $newRow.$_ })
+                if ($fields.Count -gt 0) { $changeMap[$n] = @{ IsNew = $false; Fields = $fields } }
+                $updatedCount++
+            }
+            $rows.Add($newRow)
         } else {
             Write-Warning "issue #$n 不是 issue 或抓取失败，已跳过"
         }
     } catch {
         Write-Warning "issue #$n 抓取失败: $($_.Exception.Message)"
+        if ($old) { $rows.Add($old) }  # 失败时保留历史行，避免数据丢失
     }
     Start-Sleep -Milliseconds $DelayMs
 
-    if ($i % 20 -eq 0) { Write-Host "open 处理进度 $i/$($openList.Count)（新增/刷新 $newCount，复用 $reusedCount）" }
+    if ($i % 20 -eq 0) { Write-Host "open 处理进度 $i/$($openList.Count)（新增 $newCount，更新 $updatedCount，复用 $reusedCount）" }
 }
 
 # 处理历史中存在但当前不在 open 列表的 issue（已关闭）
 foreach ($n in @($history.Keys)) {
-    if ($openNumbers.ContainsKey($n)) { continue }
-    if ($RefreshAll) { continue }  # RefreshAll 时只保留当前 open 的
+    if ($openNumbers.ContainsKey($n) -or $RefreshAll) { continue }
 
     $old = $history[$n]
+    $newState = 'closed'
     try {
         $issue = Invoke-GitHubApi -Url "https://api.github.com/repos/$Repo/issues/$n"
-        $old.'Issue状态' = $issue.state.ToLower()
-    } catch {
-        $old.'Issue状态' = 'closed'
+        $newState = $issue.state.ToLower()
+    } catch { }
+    if ($old.'Issue状态' -ne $newState) {
+        $changeMap[$n] = @{ IsNew = $false; Fields = @('Issue状态') }
     }
+    $old.'Issue状态' = $newState
     $rows.Add($old)
     $closedCount++
     Start-Sleep -Milliseconds $DelayMs
 }
 
-$sortedRows = @($rows | Sort-Object { [int]$_.'Issue编号' })
+# 统一列顺序并排序（历史行缺列时自动补空值）
+$sortedRows = @($rows | Sort-Object { [int]$_.'Issue编号' } | Select-Object $ColumnOrder)
 
 Export-CsvFile -Rows $sortedRows -Path $CsvPath
 Export-MarkdownFile -Rows $sortedRows -Path $MdPath
-Export-ExcelFile -Rows $sortedRows -Path $XlsxPath
+Export-ExcelFile -Rows $sortedRows -Path $XlsxPath -Changes $changeMap
 
 Write-Host ""
 Write-Host "完成：总计 $($sortedRows.Count) 条"
-Write-Host "  新增/全量刷新: $newCount | 复用历史(仅状态): $reusedCount | 已关闭: $closedCount"
+Write-Host "  新增: $newCount | 更新(updated_at变化): $updatedCount | 复用: $reusedCount | 已关闭: $closedCount"
+Write-Host "  变更标红: $($changeMap.Count) 行（新增整行红，字段变更单元格红）"
 Write-Host ("是否应该关闭=是: {0} / 否: {1}" -f @($sortedRows | Where-Object { $_.'是否应该关闭' -eq '是' }).Count, @($sortedRows | Where-Object { $_.'是否应该关闭' -eq '否' }).Count)
 Write-Host ("未回复: {0} / 未提供解决方案: {1}" -f @($sortedRows | Where-Object { $_.'是否已回复' -eq '否' }).Count, @($sortedRows | Where-Object { $_.'是否已提供具体解决方案' -eq '否' }).Count)
 Write-Host "CSV : $CsvPath"
