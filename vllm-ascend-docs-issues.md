@@ -1,6 +1,6 @@
 ﻿# vLLM Ascend Documentation Issues
 
-> 更新时间: 2026-11-21 10:15:08 | 仓库: vllm-project/vllm-ascend | Label: documentation | 共 187 条
+> 更新时间: 2026-11-23 08:37:37 | 仓库: vllm-project/vllm-ascend | Label: documentation | 共 187 条
 
 > Excel 版标红约定：整行红 = 新增 issue；单元格红 = 该字段本次发生变化。
 
